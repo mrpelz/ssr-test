@@ -50,11 +50,20 @@ const makeSSRRunner = <T,>() => {
         return newEntry;
       })();
 
-    if (entry.result !== pendingSymbol) return entry.result as T;
+    if (entry.result !== pendingSymbol) {
+      const result = entry.result as T;
+      ssrState.delete(id);
+
+      return result;
+    }
+
+    if (entry.promise) return null;
 
     entry.promise = new Promise<void>((resolve) => {
       cb().then((result) => {
+        entry.promise = null;
         entry.result = result;
+
         resolve();
       });
     });
@@ -64,22 +73,25 @@ const makeSSRRunner = <T,>() => {
 };
 
 const waitForAllPromises = async () => {
-  const allPromises = Array.from(ssrState.values())
-    .map(({ promise }) => promise)
-    .filter((promise): promise is Promise<void> => Boolean(promise));
+  for (const { promise } of ssrState.values()) {
+    if (!promise) continue;
 
-  await Promise.all(allPromises);
+    await promise;
+  }
 };
 
 const Context = createContext('defaultContextValue');
 
-const ssrRunner = makeSSRRunner<string>();
+const ssrRunnerA = makeSSRRunner<string>();
+const ssrRunnerB = makeSSRRunner<string>();
 
 const ProviderComponent: FC<PropsWithChildren<{ defaultValue: string }>> = ({
   children,
   defaultValue,
 }) => {
-  const [state, setState] = useState(
+  const [stateA, setStateA] = useState<string | null>(null);
+
+  const [stateB, setStateB] = useState(
     [defaultValue, 'setState_initialState'].join('\n')
   );
 
@@ -89,12 +101,15 @@ const ProviderComponent: FC<PropsWithChildren<{ defaultValue: string }>> = ({
   );
 
   useEffect(() => {
+    if (!stateA) return;
+
     const uuid = randomUUID();
-    const asyncValue = ssrRunner(() =>
-      resolveAfterWith(2000, ['asyncResult', uuid].join('\n'))
+
+    const asyncValue = ssrRunnerB(() =>
+      resolveAfterWith(2000, null).then(() => stateA)
     );
 
-    setState(
+    setStateB(
       [
         value,
         'useEffect',
@@ -104,9 +119,20 @@ const ProviderComponent: FC<PropsWithChildren<{ defaultValue: string }>> = ({
         asyncValue || 'null',
       ].join('\n')
     );
+  }, [stateA]);
+
+  useEffect(() => {
+    const uuid = randomUUID();
+
+    const asyncValue = ssrRunnerA(() =>
+      resolveAfterWith(2000, ['asyncResult', uuid].join('\n'))
+    );
+    if (!asyncValue) return;
+
+    setStateA(asyncValue);
   }, [value]);
 
-  return <Context.Provider value={state}>{children}</Context.Provider>;
+  return <Context.Provider value={stateB}>{children}</Context.Provider>;
 };
 
 const useTheContext = () => useContext(Context);
@@ -134,8 +160,8 @@ const render = () => {
   return renderToString(RootTree);
 };
 
-console.log(render());
-console.log('\n');
-
-await waitForAllPromises();
-console.log(render());
+do {
+  await waitForAllPromises();
+  console.log(render());
+  console.log('\n');
+} while (ssrState.size);
